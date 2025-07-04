@@ -1,0 +1,122 @@
+name: Dynamic Daily Activity
+
+on:
+  schedule:
+    # Runs daily at midnight UTC. Adjust '0 0 * * *' for your desired time.
+    # For example, '0 12 * * *' for noon UTC.
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      filename:
+        description: 'Name of the activity file to update'
+        required: false
+        default: 'daily_activity.txt' # Default file name
+      commit_prefix:
+        description: 'Prefix for the automated commit message (used if no custom message)'
+        required: false
+        default: 'chore: Automated daily activity' # Default commit message prefix
+      custom_message: # NEW INPUT ADDED HERE
+        description: 'Optional custom message to add to the commit. This will override the commit_prefix.'
+        required: false
+        default: '' # By default, no custom message
+
+jobs:
+  update-activity:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # This permission is crucial for the GITHUB_TOKEN to commit and push.
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          # This fetches the full history, needed for 'git diff-index'
+          fetch-depth: 0 
+
+      - name: Configure Git User
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          echo "::notice::Git user configured."
+
+      - name: Prepare Daily Activity and Detect Changes
+        id: prepare_activity
+        run: |
+          echo "::group::Preparing Activity Content"
+
+          ACTIVITY_FILE="${{ github.event.inputs.filename || 'daily_activity.txt' }}"
+          COUNT_FILE="activity_count.txt" # File to store the persistent counter
+          
+          # Retrieve inputs for commit message
+          COMMIT_PREFIX="${{ github.event.inputs.commit_prefix || 'chore: Automated daily activity' }}"
+          CUSTOM_MESSAGE="${{ github.event.inputs.custom_message }}" # Get the new custom message input
+          
+          CURRENT_DATE_TIME=$(date '+%Y-%m-%d %H:%M:%S %Z')
+
+          # --- Read and Increment Counter ---
+          CURRENT_COUNT=0
+          if [ -f "$COUNT_FILE" ]; then
+            CURRENT_COUNT=$(cat "$COUNT_FILE" | tr -d '\n\r') # Remove potential newlines
+            # Ensure it's a number, default to 0 if not
+            if ! [[ "$CURRENT_COUNT" =~ ^[0-9]+$ ]]; then
+                CURRENT_COUNT=0
+            fi
+          fi
+          NEXT_COUNT=$((CURRENT_COUNT + 1))
+          echo "$NEXT_COUNT" > "$COUNT_FILE"
+          echo "::notice::Activity counter updated to: $NEXT_COUNT"
+
+          # --- Generate Main Activity File Content ---
+          NEW_ACTIVITY_CONTENT="🚀 Daily Activity Count: ${NEXT_COUNT}\n"
+          NEW_ACTIVITY_CONTENT+="🗓️ Last Update: ${CURRENT_DATE_TIME}\n"
+          NEW_ACTIVITY_CONTENT+="✨ Hello from GitHub Actions!\n" # A little extra flair
+          echo -e "${NEW_ACTIVITY_CONTENT}" > "${ACTIVITY_FILE}"
+          echo "::notice::Generated new content for '${ACTIVITY_FILE}'."
+
+          # --- Prepare Commit Message ---
+          # Base suffix includes run count and date for automated tracking
+          BASE_COMMIT_MESSAGE_SUFFIX="(Run: ${NEXT_COUNT}, Date: $(date '+%Y-%m-%d'))"
+          
+          # Check if a custom message was provided
+          if [ -n "$CUSTOM_MESSAGE" ]; then
+            # If custom message exists, use it and append the base suffix
+            COMMIT_MESSAGE="${CUSTOM_MESSAGE} ${BASE_COMMIT_MESSAGE_SUFFIX}"
+          else
+            # If no custom message, use the default prefix and append the base suffix
+            COMMIT_MESSAGE="${COMMIT_PREFIX} ${BASE_COMMIT_MESSAGE_SUFFIX}"
+          fi
+          
+          echo "commit_message=$COMMIT_MESSAGE" >> "$GITHUB_OUTPUT" # Set as output for next step
+          echo "::notice::Commit message prepared: '${COMMIT_MESSAGE}'"
+
+          # --- Detect if any changes were actually made to the repository ---
+          git add "${ACTIVITY_FILE}" "${COUNT_FILE}" # Stage both files
+          if git diff-index --quiet HEAD --; then
+            echo "change_made=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No actual changes detected in the repository after updates. Skipping commit."
+            git reset HEAD # Unstage changes if no commit needed
+          else
+            echo "change_made=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Changes detected. Proceeding to commit."
+          fi
+          echo "::endgroup::"
+
+      - name: Commit & Push Changes
+        if: steps.prepare_activity.outputs.change_made == 'true' # Only run if changes detected
+        env:
+          # Pass the dynamic commit message as an environment variable
+          GIT_COMMIT_MESSAGE: ${{ steps.prepare_activity.outputs.commit_message }}
+        run: |
+          echo "::group::Committing and Pushing Changes"
+          git commit -m "$GIT_COMMIT_MESSAGE" || true # Using || true to prevent failure if somehow no changes found
+          
+          # Explicitly use GITHUB_TOKEN for pushing to ensure proper authentication
+          git push https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}
+          echo "::notice::Successfully committed and pushed changes to ${{ github.ref_name }}."
+          echo "::endgroup::"
+
+      - name: Report No Changes (Optional)
+        if: steps.prepare_activity.outputs.change_made == 'false'
+        run: |
+          echo "::notice::Workflow ran, but no changes were detected or needed to be committed."
+          echo "::warning::To ensure distinct days count, ensure content is truly updated daily."
